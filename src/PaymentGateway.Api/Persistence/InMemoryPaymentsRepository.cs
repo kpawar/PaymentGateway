@@ -4,7 +4,7 @@ using PaymentGateway.Api.Domain;
 
 namespace PaymentGateway.Api.Persistence;
 
-public class InMemoryPaymentsRepository
+public class InMemoryPaymentsRepository : IPaymentsRepository
 {
     private readonly ConcurrentDictionary<Guid, Payment> _paymentsById = new();
 
