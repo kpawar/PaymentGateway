@@ -39,6 +39,14 @@ public class InMemoryPaymentsRepository
 
     public Task UpdateAsync(Payment payment, CancellationToken cancellationToken = default)
     {
-        throw new NotImplementedException();
+        if (!_paymentsById.ContainsKey(payment.Id))
+        {
+            throw new KeyNotFoundException($"Payment {payment.Id} was not found.");
+        }
+
+        _paymentsById[payment.Id] = payment;
+        _paymentsByIdempotencyKey[payment.IdempotencyKey] = payment;
+
+        return Task.CompletedTask;
     }
 }
