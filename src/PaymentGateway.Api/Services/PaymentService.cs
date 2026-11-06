@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 
 using FluentValidation;
+using Microsoft.Extensions.Logging;
 
 using PaymentGateway.Api.Bank;
 using PaymentGateway.Api.Domain;
@@ -14,23 +16,29 @@ public class PaymentService(
     IValidator<PostPaymentRequest> validator,
     RequestFingerprinter fingerprinter,
     IAcquiringBankClient bank,
-    TimeProvider timeProvider) : IPaymentService
+    TimeProvider timeProvider,
+    ILogger<PaymentService> logger) : IPaymentService
 {
     public async Task<PaymentResult> ProcessAsync(
         Guid idempotencyKey, PostPaymentRequest request, CancellationToken cancellationToken = default)
     {
+        var startedAt = Stopwatch.GetTimestamp();
         var fingerprint = fingerprinter.Compute(request);
 
         var existing = await repository.GetByIdempotencyKeyAsync(idempotencyKey, cancellationToken);
         if (existing is not null)
         {
-            return ResolveExisting(existing, fingerprint);
+            return ResolveExisting(existing, fingerprint, startedAt);
         }
 
         var validation = await validator.ValidateAsync(request, cancellationToken);
         if (!validation.IsValid)
         {
             var errors = new ReadOnlyDictionary<string, string[]>(validation.ToDictionary());
+            logger.LogInformation(
+                "Payment request rejected by validation with {ValidationErrorCount} errors after {ElapsedMilliseconds} ms",
+                errors.Count,
+                ElapsedMilliseconds(startedAt));
 
             return new PaymentResult.Rejected(errors);
         }
@@ -57,7 +65,7 @@ public class PaymentService(
             existing = await repository.GetByIdempotencyKeyAsync(idempotencyKey, cancellationToken)
                 ?? throw new InvalidOperationException("The idempotency key was reserved but could not be retrieved.");
 
-            return ResolveExisting(existing, fingerprint);
+            return ResolveExisting(existing, fingerprint, startedAt);
         }
 
         BankPaymentResponse response;
@@ -65,9 +73,15 @@ public class PaymentService(
         {
             response = await bank.AuthorizeAsync(ToBankRequest(request), cancellationToken);
         }
-        catch (AcquiringBankUnavailableException)
+        catch (AcquiringBankUnavailableException exception)
         {
             await CompleteAsync(payment with { Status = PaymentStatus.Failed }, cancellationToken);
+            logger.LogWarning(
+                exception,
+                "Acquiring bank unavailable; payment marked {Outcome} after {ElapsedMilliseconds} ms for payment {PaymentId}",
+                PaymentStatus.Failed,
+                ElapsedMilliseconds(startedAt),
+                payment.Id);
 
             return new PaymentResult.BankUnavailable(payment.Id);
         }
@@ -76,6 +90,11 @@ public class PaymentService(
             ? payment with { Status = PaymentStatus.Authorized, AuthorizationCode = response.AuthorizationCode }
             : payment with { Status = PaymentStatus.Declined };
         await CompleteAsync(payment, cancellationToken);
+        logger.LogInformation(
+            "Payment completed with outcome {Outcome} for payment {PaymentId} after {ElapsedMilliseconds} ms",
+            payment.Status,
+            payment.Id,
+            ElapsedMilliseconds(startedAt));
 
         return new PaymentResult.Processed(payment);
     }
@@ -91,8 +110,36 @@ public class PaymentService(
         _ => throw new ArgumentOutOfRangeException(nameof(payment), payment.Status, "Unknown payment status.")
     };
 
-    private static PaymentResult ResolveExisting(Payment payment, string fingerprint) =>
-        payment.RequestFingerprint == fingerprint ? Replay(payment) : new PaymentResult.IdempotencyConflict();
+    private PaymentResult ResolveExisting(Payment payment, string fingerprint, long startedAt)
+    {
+        if (payment.RequestFingerprint != fingerprint)
+        {
+            logger.LogWarning(
+                "Idempotency key reused with a different payment request for payment {PaymentId} after {ElapsedMilliseconds} ms",
+                payment.Id,
+                ElapsedMilliseconds(startedAt));
+            return new PaymentResult.IdempotencyConflict();
+        }
+
+        if (payment.Status == PaymentStatus.Pending)
+        {
+            logger.LogInformation(
+                "Payment request is already in progress for payment {PaymentId} after {ElapsedMilliseconds} ms",
+                payment.Id,
+                ElapsedMilliseconds(startedAt));
+            return new PaymentResult.InProgress();
+        }
+
+        logger.LogDebug(
+            "Idempotent payment request replayed with outcome {Outcome} for payment {PaymentId} after {ElapsedMilliseconds} ms",
+            payment.Status,
+            payment.Id,
+            ElapsedMilliseconds(startedAt));
+        return Replay(payment);
+    }
+
+    private static double ElapsedMilliseconds(long startedAt) =>
+        Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds;
 
     private static BankPaymentRequest ToBankRequest(PostPaymentRequest request) => new()
     {

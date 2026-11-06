@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 
 using NSubstitute;
@@ -23,6 +25,7 @@ public class PaymentServiceTests
 
     private readonly InMemoryPaymentsRepository _repository = new();
     private readonly IAcquiringBankClient _bank = Substitute.For<IAcquiringBankClient>();
+    private readonly CapturingLogger<PaymentService> _logger = new();
     private readonly RequestFingerprinter _fingerprinter = new("test-secret");
     private readonly PaymentService _service;
 
@@ -30,7 +33,7 @@ public class PaymentServiceTests
     {
         var timeProvider = new FakeTimeProvider(Now);
         _service = new PaymentService(
-            _repository, new PostPaymentRequestValidator(timeProvider), _fingerprinter, _bank, timeProvider);
+            _repository, new PostPaymentRequestValidator(timeProvider), _fingerprinter, _bank, timeProvider, _logger);
     }
 
     [Fact]
@@ -43,6 +46,17 @@ public class PaymentServiceTests
         rejected.Errors.Keys.ShouldContain("ExpiryDate");
         (await _repository.GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
         await _bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
+        var log = _logger.Entries.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Information);
+        log.Message.ShouldStartWith("Payment request rejected by validation");
+        log.Properties["ValidationErrorCount"].ShouldBe(1);
+        log.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
+        log.Properties.ContainsKey("PaymentId").ShouldBeFalse();
+        log.Properties.ContainsKey("RequestFingerprint").ShouldBeFalse();
+        log.Message.ShouldNotContain("2222405343248877");
+        log.Message.ShouldNotContain("7391");
+        log.Properties.Values.Select(value => value?.ToString())
+            .ShouldNotContain(_fingerprinter.Compute(ExpiredRequest()));
     }
 
     [Fact]
@@ -69,6 +83,7 @@ public class PaymentServiceTests
 
         var payment = result.ShouldBeOfType<PaymentResult.Processed>().Payment;
         payment.Status.ShouldBe(PaymentStatus.Authorized);
+        AssertOutcomeLog(PaymentStatus.Authorized, payment.Id);
         payment.AuthorizationCode.ShouldBe("auth-code");
         payment.IdempotencyKey.ShouldBe(idempotencyKey);
         payment.CardNumberLastFour.ShouldBe("8877");
@@ -100,6 +115,7 @@ public class PaymentServiceTests
 
         var payment = result.ShouldBeOfType<PaymentResult.Processed>().Payment;
         payment.Status.ShouldBe(PaymentStatus.Declined);
+        AssertOutcomeLog(PaymentStatus.Declined, payment.Id);
         payment.AuthorizationCode.ShouldBeNull();
         payment.CardNumberLastFour.ShouldBe("8877");
         (await _repository.GetByIdAsync(payment.Id)).ShouldBe(payment);
@@ -119,6 +135,13 @@ public class PaymentServiceTests
         stored.Status.ShouldBe(PaymentStatus.Failed);
         stored.AuthorizationCode.ShouldBeNull();
         stored.CardNumberLastFour.ShouldBe("8877");
+        var log = _logger.Entries.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Warning);
+        log.Message.ShouldStartWith("Acquiring bank unavailable; payment marked Failed");
+        log.Properties["PaymentId"].ShouldBe(paymentId);
+        log.Properties["Outcome"]?.ToString().ShouldBe(nameof(PaymentStatus.Failed));
+        log.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
+        log.Exception.ShouldBeOfType<AcquiringBankUnavailableException>();
     }
 
     [Theory]
@@ -134,6 +157,11 @@ public class PaymentServiceTests
         var second = await _service.ProcessAsync(idempotencyKey, ValidRequest());
 
         second.ShouldBe(first);
+        var firstPayment = first.ShouldBeOfType<PaymentResult.Processed>().Payment;
+        var replayLog = _logger.Entries.Single(entry => entry.Message.StartsWith("Idempotent payment request replayed"));
+        replayLog.Properties["PaymentId"].ShouldBe(firstPayment.Id);
+        replayLog.Properties["Outcome"]?.ToString().ShouldBe(firstPayment.Status.ToString());
+        replayLog.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
         await _bank.ReceivedWithAnyArgs(1).AuthorizeAsync(default!);
     }
 
@@ -208,6 +236,13 @@ public class PaymentServiceTests
         var second = await _service.ProcessAsync(idempotencyKey, ValidRequest(amount: 999));
 
         second.ShouldBeOfType<PaymentResult.IdempotencyConflict>();
+        var conflictLog = _logger.Entries.Single(entry =>
+            entry.Message.StartsWith("Idempotency key reused with a different payment request"));
+        conflictLog.Level.ShouldBe(LogLevel.Warning);
+        conflictLog.Message.ShouldStartWith("Idempotency key reused with a different payment request");
+        conflictLog.Properties["PaymentId"].ShouldBe(
+            (await _repository.GetByIdempotencyKeyAsync(idempotencyKey))!.Id);
+        conflictLog.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
         await _bank.ReceivedWithAnyArgs(1).AuthorizeAsync(default!);
     }
 
@@ -229,6 +264,12 @@ public class PaymentServiceTests
         var result = await _service.ProcessAsync(idempotencyKey, request);
 
         result.ShouldBeOfType<PaymentResult.InProgress>();
+        var inProgressLog = _logger.Entries.ShouldHaveSingleItem();
+        inProgressLog.Level.ShouldBe(LogLevel.Information);
+        inProgressLog.Message.ShouldStartWith("Payment request is already in progress");
+        inProgressLog.Properties["PaymentId"].ShouldBe(
+            (await _repository.GetByIdempotencyKeyAsync(idempotencyKey))!.Id);
+        inProgressLog.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
         await _bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
     }
 
@@ -264,4 +305,49 @@ public class PaymentServiceTests
         Amount = amount,
         Cvv = cvv
     };
+
+    private void AssertOutcomeLog(PaymentStatus status, Guid paymentId)
+    {
+        var log = _logger.Entries.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Information);
+        log.Message.ShouldStartWith("Payment completed with outcome " + status);
+        log.Properties["PaymentId"].ShouldBe(paymentId);
+        log.Properties["Outcome"]?.ToString().ShouldBe(status.ToString());
+        log.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
+        log.Properties.ContainsKey("RequestFingerprint").ShouldBeFalse();
+        log.Message.ShouldNotContain("2222405343248877");
+        log.Message.ShouldNotContain("7391");
+        log.Properties.Values.Select(value => value?.ToString())
+            .ShouldNotContain(_fingerprinter.Compute(ValidRequest()));
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly ConcurrentQueue<CapturedLog> _entries = new();
+
+        public IReadOnlyList<CapturedLog> Entries => _entries.ToArray();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            var properties = state is IEnumerable<KeyValuePair<string, object?>> values
+                ? values.ToDictionary(pair => pair.Key, pair => pair.Value)
+                : new Dictionary<string, object?>();
+            _entries.Enqueue(new CapturedLog(logLevel, formatter(state, exception), properties, exception));
+        }
+    }
+
+    private sealed record CapturedLog(
+        LogLevel Level,
+        string Message,
+        IReadOnlyDictionary<string, object?> Properties,
+        Exception? Exception);
 }
