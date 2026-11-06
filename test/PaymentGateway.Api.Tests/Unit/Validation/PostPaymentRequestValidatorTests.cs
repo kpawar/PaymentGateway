@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using PaymentGateway.Api.Models.Requests;
 using PaymentGateway.Api.Validation;
 using Shouldly;
@@ -6,7 +7,9 @@ namespace PaymentGateway.Api.Tests.Unit.Validation;
 
 public class PostPaymentRequestValidatorTests
 {
-    private readonly PostPaymentRequestValidator _validator = new();
+    private static readonly DateTimeOffset Now = new(2026, 6, 15, 12, 0, 0, TimeSpan.Zero);
+
+    private readonly PostPaymentRequestValidator _validator = new(new FakeTimeProvider(Now));
 
     [Fact]
     public void Validate_ValidRequest_Passes()
@@ -74,11 +77,51 @@ public class PostPaymentRequestValidatorTests
         result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.ExpiryMonth));
     }
 
-    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4) => new()
+    [Theory]
+    [InlineData(2026, 6)]
+    [InlineData(2026, 7)]
+    [InlineData(2027, 1)]
+    public void Validate_ExpiryInCurrentMonthOrLater_Passes(int expiryYear, int expiryMonth)
+    {
+        var result = _validator.Validate(ValidRequest(expiryMonth: expiryMonth, expiryYear: expiryYear));
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(2026, 5)]
+    [InlineData(2025, 12)]
+    public void Validate_ExpiryInThePast_FailsOnExpiryDate(int expiryYear, int expiryMonth)
+    {
+        var result = _validator.Validate(ValidRequest(expiryMonth: expiryMonth, expiryYear: expiryYear));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == "ExpiryDate");
+    }
+
+    [Fact]
+    public void Validate_ExpiryYearMissing_FailsOnExpiryYear()
+    {
+        var result = _validator.Validate(ValidRequest(expiryYear: null));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.ExpiryYear));
+    }
+
+    [Fact]
+    public void Validate_PastYearWithInvalidMonth_FailsOnExpiryMonthOnly()
+    {
+        var result = _validator.Validate(ValidRequest(expiryMonth: 13, expiryYear: 2020));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.ExpiryMonth));
+    }
+
+    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4, int? expiryYear = 2030) => new()
     {
         CardNumber = cardNumber,
         ExpiryMonth = expiryMonth,
-        ExpiryYear = 2030,
+        ExpiryYear = expiryYear,
         Currency = "GBP",
         Amount = 100,
         Cvv = "123"
