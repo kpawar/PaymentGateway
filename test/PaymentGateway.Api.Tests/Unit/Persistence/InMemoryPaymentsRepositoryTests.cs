@@ -1,5 +1,4 @@
 using PaymentGateway.Api.Domain;
-using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Persistence;
 
 using Shouldly;

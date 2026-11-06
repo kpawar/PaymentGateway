@@ -6,7 +6,6 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 
 using PaymentGateway.Api.Domain;
-using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Models.Responses;
 using PaymentGateway.Api.Persistence;
 
@@ -42,7 +41,7 @@ public class PaymentsControllerTests
             UpdatedAt = now
         };
 
-        var webApplicationFactory = new WebApplicationFactory<Program>();
+        using var webApplicationFactory = new WebApplicationFactory<Program>();
         var repository = webApplicationFactory.Services.GetRequiredService<IPaymentsRepository>();
         await repository.TryAddAsync(payment);
         var client = webApplicationFactory.CreateClient();
@@ -73,13 +72,13 @@ public class PaymentsControllerTests
     public async Task Returns404IfPaymentNotFound()
     {
         // Arrange
-        var webApplicationFactory = new WebApplicationFactory<Program>();
+        using var webApplicationFactory = new WebApplicationFactory<Program>();
         var client = webApplicationFactory.CreateClient();
         
         // Act
         var response = await client.GetAsync($"/api/Payments/{Guid.NewGuid()}");
         
         // Assert
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
     }
 }
