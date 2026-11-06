@@ -33,6 +33,15 @@ public class PostPaymentRequestValidator : AbstractValidator<PostPaymentRequest>
         RuleFor(r => r.Currency)
             .NotEmpty().WithMessage("Currency is required.")
             .Must(c => SupportedCurrencies.Contains(c)).WithMessage("Currency must be one of: GBP, USD, EUR.");
+
+        RuleFor(r => r.Amount)
+            .NotNull().WithMessage("Amount is required.")
+            .GreaterThan(0).WithMessage("Amount must be greater than 0.");
+
+        RuleFor(r => r.Cvv)
+            .NotEmpty().WithMessage("CVV is required.")
+            .Length(3, 4).WithMessage("CVV must be 3 or 4 characters long.")
+            .Must(IsAllDigits).WithMessage("CVV must contain only digits.");
     }
 
     private static bool IsInPast(int year, int month, DateTimeOffset now) =>

@@ -142,13 +142,71 @@ public class PostPaymentRequestValidatorTests
         result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.Currency));
     }
 
-    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4, int? expiryYear = 2030, string? currency = "GBP") => new()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(int.MaxValue)]
+    public void Validate_PositiveAmount_Passes(int amount)
+    {
+        var result = _validator.Validate(ValidRequest(amount: amount));
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(null)]
+    public void Validate_NonPositiveOrMissingAmount_Fails(int? amount)
+    {
+        var result = _validator.Validate(ValidRequest(amount: amount));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.Amount));
+    }
+
+    [Theory]
+    [InlineData("123")]
+    [InlineData("1234")]
+    [InlineData("012")]
+    public void Validate_CvvOfThreeOrFourDigits_Passes(string cvv)
+    {
+        var result = _validator.Validate(ValidRequest(cvv: cvv));
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("12")]
+    [InlineData("12345")]
+    [InlineData("12a")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Validate_InvalidCvv_Fails(string? cvv)
+    {
+        var result = _validator.Validate(ValidRequest(cvv: cvv));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.Cvv));
+    }
+
+    [Fact]
+    public void Validate_InvalidCvv_ErrorMessageDoesNotEchoTheValue()
+    {
+        const string cvv = "12a";
+
+        var result = _validator.Validate(ValidRequest(cvv: cvv));
+
+        result.Errors.ShouldNotBeEmpty();
+        result.Errors.ShouldAllBe(e => !e.ErrorMessage.Contains(cvv));
+    }
+
+    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4, int? expiryYear = 2030, string? currency = "GBP", int? amount = 100, string? cvv = "123") => new()
     {
         CardNumber = cardNumber,
         ExpiryMonth = expiryMonth,
         ExpiryYear = expiryYear,
         Currency = currency,
-        Amount = 100,
-        Cvv = "123"
+        Amount = amount,
+        Cvv = cvv
     };
 }
