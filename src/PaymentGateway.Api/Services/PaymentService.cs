@@ -20,6 +20,21 @@ public class PaymentService(
         Guid idempotencyKey, PostPaymentRequest request, CancellationToken cancellationToken = default)
     {
         var fingerprint = fingerprinter.Compute(request);
+
+        var existing = await repository.GetByIdempotencyKeyAsync(idempotencyKey, cancellationToken);
+        if (existing is not null)
+        {
+            return ResolveExisting(existing, fingerprint);
+        }
+
+        var validation = await validator.ValidateAsync(request, cancellationToken);
+        if (!validation.IsValid)
+        {
+            var errors = new ReadOnlyDictionary<string, string[]>(validation.ToDictionary());
+
+            return new PaymentResult.Rejected(errors);
+        }
+
         var now = timeProvider.GetUtcNow();
 
         // Reserving the idempotency key is atomic, so concurrent duplicates cannot both reach the bank.
@@ -39,18 +54,10 @@ public class PaymentService(
         };
         if (!await repository.TryAddAsync(payment, cancellationToken))
         {
-            var existing = (await repository.GetByIdempotencyKeyAsync(idempotencyKey, cancellationToken))!;
+            existing = await repository.GetByIdempotencyKeyAsync(idempotencyKey, cancellationToken)
+                ?? throw new InvalidOperationException("The idempotency key was reserved but could not be retrieved.");
 
-            return existing.RequestFingerprint == fingerprint ? Replay(existing) : new PaymentResult.IdempotencyConflict();
-        }
-
-        var validation = await validator.ValidateAsync(request, cancellationToken);
-        if (!validation.IsValid)
-        {
-            var errors = new ReadOnlyDictionary<string, string[]>(validation.ToDictionary());
-            await CompleteAsync(payment with { Status = PaymentStatus.Rejected, RejectionReasons = errors }, cancellationToken);
-
-            return new PaymentResult.Rejected(payment.Id, errors);
+            return ResolveExisting(existing, fingerprint);
         }
 
         BankPaymentResponse response;
@@ -79,11 +86,13 @@ public class PaymentService(
     private static PaymentResult Replay(Payment payment) => payment.Status switch
     {
         PaymentStatus.Authorized or PaymentStatus.Declined => new PaymentResult.Processed(payment),
-        PaymentStatus.Rejected => new PaymentResult.Rejected(payment.Id, payment.RejectionReasons!),
         PaymentStatus.Failed => new PaymentResult.BankUnavailable(payment.Id),
         PaymentStatus.Pending => new PaymentResult.InProgress(),
         _ => throw new ArgumentOutOfRangeException(nameof(payment), payment.Status, "Unknown payment status.")
     };
+
+    private static PaymentResult ResolveExisting(Payment payment, string fingerprint) =>
+        payment.RequestFingerprint == fingerprint ? Replay(payment) : new PaymentResult.IdempotencyConflict();
 
     private static BankPaymentRequest ToBankRequest(PostPaymentRequest request) => new()
     {

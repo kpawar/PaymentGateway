@@ -84,7 +84,6 @@ public class PaymentsController : ControllerBase
             Status = StatusCodes.Status400BadRequest,
             Title = "One or more validation errors occurred."
         };
-        problem.Extensions["paymentId"] = rejected.PaymentId;
         problem.Extensions["status"] = nameof(PaymentStatus.Rejected);
 
         return BadRequest(problem);

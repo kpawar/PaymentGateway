@@ -11,7 +11,7 @@ public abstract record PaymentResult
     public sealed record Processed(Payment Payment) : PaymentResult;
 
     /// <summary>The request failed validation. Errors are keyed by property name.</summary>
-    public sealed record Rejected(Guid PaymentId, IReadOnlyDictionary<string, string[]> Errors) : PaymentResult;
+    public sealed record Rejected(IReadOnlyDictionary<string, string[]> Errors) : PaymentResult;
 
     /// <summary>The idempotency key was already used with a different request body.</summary>
     public sealed record IdempotencyConflict : PaymentResult;

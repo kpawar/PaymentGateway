@@ -36,53 +36,25 @@ public class PaymentServiceTests
     [Fact]
     public async Task ProcessAsync_InvalidRequest_ReturnsRejectedWithValidationErrors()
     {
-        var result = await _service.ProcessAsync(Guid.NewGuid(), ExpiredRequest());
+        var idempotencyKey = Guid.NewGuid();
+        var result = await _service.ProcessAsync(idempotencyKey, ExpiredRequest());
 
         var rejected = result.ShouldBeOfType<PaymentResult.Rejected>();
-        rejected.PaymentId.ShouldNotBe(Guid.Empty);
         rejected.Errors.Keys.ShouldContain("ExpiryDate");
+        (await _repository.GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
         await _bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
     }
 
     [Fact]
-    public async Task ProcessAsync_InvalidRequest_StoresRejectedPaymentWithoutCardNumberOrCvv()
+    public async Task ProcessAsync_InvalidRequest_DoesNotStorePayment()
     {
         var idempotencyKey = Guid.NewGuid();
         var request = ExpiredRequest();
 
         var result = await _service.ProcessAsync(idempotencyKey, request);
 
-        var paymentId = result.ShouldBeOfType<PaymentResult.Rejected>().PaymentId;
-        var stored = await _repository.GetByIdAsync(paymentId);
-        stored.ShouldNotBeNull();
-        stored.Status.ShouldBe(PaymentStatus.Rejected);
-        stored.IdempotencyKey.ShouldBe(idempotencyKey);
-        stored.RequestFingerprint.ShouldBe(_fingerprinter.Compute(request));
-        stored.RejectionReasons.ShouldNotBeNull()["ExpiryDate"].ShouldContain("Card expiry date must be in the future.");
-        stored.CreatedAt.ShouldBe(Now);
-        stored.UpdatedAt.ShouldBe(Now);
-
-        var serialised = JsonSerializer.Serialize(stored with { RequestFingerprint = "" });
-        serialised.ShouldNotContain(request.CardNumber!);
-        serialised.ShouldNotContain(request.Cvv!);
-    }
-
-    [Theory]
-    [InlineData("2222405343248877", "8877")]
-    [InlineData("123456", "3456")]
-    [InlineData("1234", "1234")]
-    [InlineData("123", null)]
-    [InlineData("1234567890abcd", null)]
-    [InlineData("", null)]
-    [InlineData(null, null)]
-    public async Task ProcessAsync_InvalidRequest_StoresLastFourOnlyWhenCardNumberIsFourOrMoreDigits(
-        string? cardNumber, string? expectedLastFour)
-    {
-        var result = await _service.ProcessAsync(Guid.NewGuid(), ExpiredRequest(cardNumber));
-
-        var paymentId = result.ShouldBeOfType<PaymentResult.Rejected>().PaymentId;
-        var stored = await _repository.GetByIdAsync(paymentId);
-        stored.ShouldNotBeNull().CardNumberLastFour.ShouldBe(expectedLastFour);
+        result.ShouldBeOfType<PaymentResult.Rejected>();
+        (await _repository.GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
     }
 
     [Fact]
@@ -180,17 +152,35 @@ public class PaymentServiceTests
     }
 
     [Fact]
-    public async Task ProcessAsync_SameKeyAndRejectedBodyAgain_ReplaysTheSameRejectionWithoutCallingTheBank()
+    public async Task ProcessAsync_SameKeyAndRejectedBodyAgain_ReturnsValidationErrorsWithoutStoring()
     {
         var idempotencyKey = Guid.NewGuid();
         var first = await _service.ProcessAsync(idempotencyKey, ExpiredRequest());
 
         var second = await _service.ProcessAsync(idempotencyKey, ExpiredRequest());
 
-        var replayed = second.ShouldBeOfType<PaymentResult.Rejected>();
-        replayed.PaymentId.ShouldBe(first.ShouldBeOfType<PaymentResult.Rejected>().PaymentId);
-        replayed.Errors["ExpiryDate"].ShouldBe(["Card expiry date must be in the future."]);
+        first.ShouldBeOfType<PaymentResult.Rejected>().Errors["ExpiryDate"]
+            .ShouldBe(["Card expiry date must be in the future."]);
+        second.ShouldBeOfType<PaymentResult.Rejected>().Errors["ExpiryDate"]
+            .ShouldBe(["Card expiry date must be in the future."]);
+        (await _repository.GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
         await _bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ValidRequestAfterRejectedRequestWithSameKey_ProcessesPayment()
+    {
+        var idempotencyKey = Guid.NewGuid();
+        _bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new BankPaymentResponse(true, "auth-code"));
+
+        var rejected = await _service.ProcessAsync(idempotencyKey, ExpiredRequest());
+        var processed = await _service.ProcessAsync(idempotencyKey, ValidRequest());
+
+        rejected.ShouldBeOfType<PaymentResult.Rejected>();
+        processed.ShouldBeOfType<PaymentResult.Processed>().Payment.Status.ShouldBe(PaymentStatus.Authorized);
+        (await _repository.GetByIdempotencyKeyAsync(idempotencyKey))?.Status.ShouldBe(PaymentStatus.Authorized);
+        await _bank.Received(1).AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

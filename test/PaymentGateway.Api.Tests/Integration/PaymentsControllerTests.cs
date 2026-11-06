@@ -124,22 +124,22 @@ public class PaymentsControllerTests
     }
 
     [Fact]
-    public async Task PostsInvalidPaymentAndStoresRejectedAttempt()
+    public async Task PostsInvalidPaymentWithoutCreatingPaymentRecord()
     {
+        var idempotencyKey = Guid.NewGuid();
         var bank = Substitute.For<IAcquiringBankClient>();
         using var factory = new PaymentsApiFactory(bank);
         var client = factory.CreateClient();
 
-        using var response = await PostPaymentAsync(client, Guid.NewGuid().ToString(), ValidRequest(expiryYear: 2020));
+        using var response = await PostPaymentAsync(client, idempotencyKey.ToString(), ValidRequest(expiryYear: 2020));
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        var paymentId = body.RootElement.GetProperty("paymentId").GetGuid();
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         body.RootElement.GetProperty("status").GetString().ShouldBe("Rejected");
         body.RootElement.GetProperty("errors").GetProperty("ExpiryDate").GetArrayLength().ShouldBeGreaterThan(0);
-        var stored = await factory.Services.GetRequiredService<IPaymentsRepository>().GetByIdAsync(paymentId);
-        stored.ShouldNotBeNull();
-        stored.Status.ShouldBe(PaymentStatus.Rejected);
+        body.RootElement.TryGetProperty("paymentId", out _).ShouldBeFalse();
+        (await factory.Services.GetRequiredService<IPaymentsRepository>()
+            .GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
         await bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
     }
 
@@ -308,21 +308,16 @@ public class PaymentsControllerTests
         retrieved.ShouldBe(posted with { Status = status });
     }
 
-    [Theory]
-    [InlineData(true, PaymentStatus.Rejected)]
-    [InlineData(false, PaymentStatus.Failed)]
-    public async Task RejectedOrFailedPaymentCanBeRetrieved(bool isRejected, PaymentStatus status)
+    [Fact]
+    public async Task FailedPaymentCanBeRetrieved()
     {
         var bank = Substitute.For<IAcquiringBankClient>();
-        if (!isRejected)
-        {
-            bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
-                .ThrowsAsync(new AcquiringBankUnavailableException("bank unavailable"));
-        }
+        bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new AcquiringBankUnavailableException("bank unavailable"));
 
         using var factory = new PaymentsApiFactory(bank);
         var client = factory.CreateClient();
-        var request = ValidRequest(expiryYear: isRejected ? 2020 : 2030);
+        var request = ValidRequest();
         using var postResponse = await PostPaymentAsync(client, Guid.NewGuid().ToString(), request);
         using var postBody = JsonDocument.Parse(await postResponse.Content.ReadAsStringAsync());
         var paymentId = postBody.RootElement.GetProperty("paymentId").GetGuid();
@@ -331,49 +326,41 @@ public class PaymentsControllerTests
         var retrieved = JsonSerializer.Deserialize<PaymentResponse>(
             await getResponse.Content.ReadAsStringAsync(), JsonOptions);
 
-        postResponse.StatusCode.ShouldBe(isRejected ? HttpStatusCode.BadRequest : HttpStatusCode.BadGateway);
+        postResponse.StatusCode.ShouldBe(HttpStatusCode.BadGateway);
         getResponse.StatusCode.ShouldBe(HttpStatusCode.OK);
         retrieved.ShouldNotBeNull().Id.ShouldBe(paymentId);
-        retrieved.Status.ShouldBe(status);
+        retrieved.Status.ShouldBe(PaymentStatus.Failed);
         retrieved.CardNumberLastFour.ShouldBe("8877");
         retrieved.ExpiryMonth.ShouldBe(4);
-        retrieved.ExpiryYear.ShouldBe(request.ExpiryYear);
+        retrieved.ExpiryYear.ShouldBe(2030);
         retrieved.Currency.ShouldBe("GBP");
         retrieved.Amount.ShouldBe(1050);
     }
 
-    [Theory]
-    [InlineData(true, HttpStatusCode.BadRequest)]
-    [InlineData(false, HttpStatusCode.BadGateway)]
-    public async Task RepostingRejectedOrFailedPaymentReplaysOriginalResponse(
-        bool isRejected, HttpStatusCode expectedStatus)
+    [Fact]
+    public async Task RejectedRequestDoesNotReserveKeyAndCanBeCorrected()
     {
         var idempotencyKey = Guid.NewGuid();
         var bank = Substitute.For<IAcquiringBankClient>();
-        if (!isRejected)
-        {
-            bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
-                .ThrowsAsync(new AcquiringBankUnavailableException("bank unavailable"));
-        }
+        bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .Returns(new BankPaymentResponse(true, "auth-code"));
 
         using var factory = new PaymentsApiFactory(bank);
         var client = factory.CreateClient();
-        var request = ValidRequest(expiryYear: isRejected ? 2020 : 2030);
-        using var first = await PostPaymentAsync(client, idempotencyKey.ToString(), request);
-        var firstBody = await first.Content.ReadAsStringAsync();
-        using var replay = await PostPaymentAsync(client, idempotencyKey.ToString(), request);
+        var repository = factory.Services.GetRequiredService<IPaymentsRepository>();
 
-        first.StatusCode.ShouldBe(expectedStatus);
-        replay.StatusCode.ShouldBe(first.StatusCode);
-        (await replay.Content.ReadAsStringAsync()).ShouldBe(firstBody);
-        if (isRejected)
-        {
-            await bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
-        }
-        else
-        {
-            await bank.Received(1).AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>());
-        }
+        using var rejected = await PostPaymentAsync(
+            client, idempotencyKey.ToString(), ValidRequest(expiryYear: 2020));
+        using var rejectedBody = JsonDocument.Parse(await rejected.Content.ReadAsStringAsync());
+        using var corrected = await PostPaymentAsync(
+            client, idempotencyKey.ToString(), ValidRequest());
+
+        rejected.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        rejectedBody.RootElement.GetProperty("status").GetString().ShouldBe("Rejected");
+        rejectedBody.RootElement.TryGetProperty("paymentId", out _).ShouldBeFalse();
+        corrected.StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await repository.GetByIdempotencyKeyAsync(idempotencyKey))?.Status.ShouldBe(PaymentStatus.Authorized);
+        await bank.Received(1).AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>());
     }
 
     private static async Task<HttpResponseMessage> PostPaymentAsync(
