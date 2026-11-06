@@ -52,10 +52,32 @@ public class PostPaymentRequestValidatorTests
         result.Errors.ShouldAllBe(e => !e.ErrorMessage.Contains(cardNumber));
     }
 
-    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877") => new()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(12)]
+    public void Validate_ExpiryMonthWithinBounds_Passes(int expiryMonth)
+    {
+        var result = _validator.Validate(ValidRequest(expiryMonth: expiryMonth));
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(13)]
+    [InlineData(null)]
+    public void Validate_InvalidExpiryMonth_Fails(int? expiryMonth)
+    {
+        var result = _validator.Validate(ValidRequest(expiryMonth: expiryMonth));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.ExpiryMonth));
+    }
+
+    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4) => new()
     {
         CardNumber = cardNumber,
-        ExpiryMonth = 4,
+        ExpiryMonth = expiryMonth,
         ExpiryYear = 2030,
         Currency = "GBP",
         Amount = 100,
