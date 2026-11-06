@@ -16,6 +16,7 @@ public record Payment
     public string? Currency { get; init; }
     public int? Amount { get; init; }
     public string? AuthorizationCode { get; init; }
+    public IReadOnlyList<string>? RejectionReasons { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset UpdatedAt { get; init; }
 }
