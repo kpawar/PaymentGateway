@@ -5,8 +5,9 @@
 > - TDD step 2 (repository): done. 10 unit tests in `Unit/Persistence/InMemoryPaymentsRepositoryTests.cs` pass against `InMemoryPaymentsRepository`, which implements `IPaymentsRepository`.
 > - TDD step 3 (GET endpoint): done. Integration tests in `Integration/PaymentsControllerTests.cs` cover 404 and a seeded payment (masked `PaymentResponse`, status as string). Old boilerplate repository and response DTOs removed. Tidy-up: `PaymentStatus` moved to `Domain/` (namespace `PaymentGateway.Api.Domain`), stale usings removed, factories disposed. `Failed` status is added later in step 6.
 > - TDD step 4 (validator): done. `PostPaymentRequest` reshaped (nullable, `CardNumber` and `Cvv` as strings). `PostPaymentRequestValidator` covers card number, expiry month, expiry (year and month vs `TimeProvider`, reported on the combined `ExpiryDate` field), currency, amount and CVV. Messages never echo card data. The planned all-null request test was skipped, because each field already has its own null case.
-> - TDD step 5 (bank client): done. `AcquiringBankClient` posts a snake_case body with `MM/YYYY` expiry to `/payments` and returns `BankPaymentResponse(Authorized, AuthorizationCode)`. A non-success status (including 400), a connection error and a timeout all throw `AcquiringBankUnavailableException`; a cancellation by the caller propagates unchanged. Tested with `StubHttpMessageHandler`. 64 tests pass in total. Not yet done, because nothing needs them until step 6: the `IAcquiringBankClient` interface, `AcquiringBankOptions` (BaseUrl, Timeout) and the typed `HttpClient` registration in `Program.cs`.
-> - TDD step 6 (`PaymentService`): in progress. 6a done: `Services/RequestFingerprinter` (HMAC-SHA256 hex over card number, expiry, currency and amount; CVV excluded; secret-keyed; tolerates missing fields), 10 tests, 6b done: `PaymentService.ProcessAsync` for an invalid request returns `PaymentResult.Rejected(PaymentId, Errors)` and stores a `Rejected` payment (fingerprint, `RejectionReasons`, timestamps; no card number or CVV). 6c done: `IAcquiringBankClient` added (implemented by `AcquiringBankClient`) and injected into `PaymentService`. A valid request is sent to the bank and stored as `Authorized` (with the authorization code) or `Declined` and returned as `PaymentResult.Processed`; `AcquiringBankUnavailableException` stores a `Failed` payment and returns `PaymentResult.BankUnavailable`; a rejected request never calls the bank. `Failed` added to `PaymentStatus`. Last four digits of a rejected attempt are stored only when the card number is all digits and at least 4 long. The service stores each payment once, after the outcome is known (no `Pending` reservation yet). 6d done: idempotency lookup. A repeat of the same key and body replays the stored outcome (Processed, Rejected with the same field errors, or BankUnavailable) without calling the bank again; the same key with a different body returns `PaymentResult.IdempotencyConflict`; a different CVV alone still replays, because the fingerprint excludes it. `Payment.RejectionReasons` is now a property-to-messages dictionary so a replayed rejection returns the same body. 92 tests pass in total. Remaining in step 6 (6e): reserve the key as `Pending` with an atomic `TryAddAsync` before validating and calling the bank, then update; an in-progress duplicate returns a new `InProgress` result; concurrent duplicates call the bank once. Then, for step 7: `IPaymentService`, the fingerprint secret option and the DI registrations (validator, `TimeProvider`, bank client, `AcquiringBankOptions`).
+> - TDD step 5 (bank client): done. `AcquiringBankClient` posts a snake_case body with `MM/YYYY` expiry to `/payments` and returns `BankPaymentResponse(Authorized, AuthorizationCode)`. A non-success status (including 400), a connection error and a timeout all throw `AcquiringBankUnavailableException`; a cancellation by the caller propagates unchanged. Tested with `StubHttpMessageHandler`. `IAcquiringBankClient` was added in step 6 and is implemented by `AcquiringBankClient`; its options and typed `HttpClient` registration were added in step 7.
+> - TDD step 6 (`PaymentService`): done. 6a: `Services/RequestFingerprinter` computes a secret-keyed HMAC-SHA256 over card number, expiry, currency and amount (CVV excluded), tolerating missing fields. 6b: invalid requests return `PaymentResult.Rejected(PaymentId, Errors)` and are stored as `Rejected` with fingerprint, `RejectionReasons` and timestamps; full card number and CVV are not stored. 6c: valid requests are sent through `IAcquiringBankClient` and stored as `Authorized` (including authorization code) or `Declined`; bank unavailability stores `Failed` and returns `PaymentResult.BankUnavailable`. Rejected requests do not call the bank. For rejected attempts, last four digits are kept only if the supplied card number is all digits and at least four characters long. 6d: matching idempotency keys and fingerprints replay the original outcome (including validation errors or bank failure), different fingerprints return `PaymentResult.IdempotencyConflict`, and CVV-only changes replay because CVV is excluded from the fingerprint. 6e: the service atomically reserves a `Pending` payment via `TryAddAsync` before validation or bank access, then updates it with its final outcome; matching in-flight duplicates return `InProgress`. Concurrent duplicate requests are covered by a test asserting the bank is called once. The focused `PaymentServiceTests` suite passes (20 tests).
+> - TDD step 7 (POST endpoint): done. POST integration tests were written first and verified red before implementation. `PaymentsController` now maps all service results to the HTTP contract, `IPaymentService` defines the boundary, and `Program.cs` registers the validator, `TimeProvider`, fingerprinter, service, and typed bank client. `AcquiringBankOptions` configures the bank URL and timeout; `RequestFingerprint:Secret` (environment variable `RequestFingerprint__Secret`) is required and validated as at least 32 bytes. Integration tests cover authorized, declined, rejected, failed, replay, conflict, in-progress, invalid/missing keys, malformed JSON, and POST followed by GET for all stored statuses. Rejected and failed attempts retain supplied expiry, currency, and amount metadata for GET. All 110 non-simulator tests pass.
 > - Decision change since the plan was first written: fingerprint uses HMAC-SHA256 without the CVV (see POST flow and assumption 8).
 
 ## Context
@@ -41,7 +42,7 @@ The plan has to stay simple and readable, be test-driven (red, green, refactor) 
 
 ```
 src/PaymentGateway.Api/
-  Controllers/PaymentsController.cs          thin: header/body -> service -> map result to HTTP (GET only so far; reads the repository directly until step 7)
+  Controllers/PaymentsController.cs          POST: header/body -> service -> HTTP result; GET reads the repository directly
   Models/Requests/PostPaymentRequest.cs      CardNumber, ExpiryMonth, ExpiryYear, Currency, Amount, Cvv (string for digit fields, nullable)
   Models/Responses/PaymentResponse.cs        Id, Status, CardNumberLastFour, ExpiryMonth, ExpiryYear, Currency, Amount
   Domain/Payment.cs                          stored entity (see below)
@@ -49,14 +50,15 @@ src/PaymentGateway.Api/
   Validation/PostPaymentRequestValidator.cs  FluentValidation + TimeProvider (done)
   Services/RequestFingerprinter.cs           (done) HMAC-SHA256 fingerprint, CVV excluded
   Services/IPaymentService.cs, PaymentService.cs     idempotency -> validate -> bank -> persist
+  Services/RequestFingerprintOptions.cs       configured HMAC secret (required; minimum 32 bytes)
   Services/PaymentResult.cs                  outcome type: Processed | Rejected(errors) | BankUnavailable | IdempotencyConflict
   Persistence/IPaymentsRepository.cs, InMemoryPaymentsRepository.cs
   Bank/AcquiringBankClient.cs (done; owns the private snake_case wire record and the MM/YYYY formatting),
   Bank/BankPaymentRequest.cs (plain input: ExpiryMonth, ExpiryYear as ints), Bank/BankPaymentResponse.cs (done)
   Bank/IAcquiringBankClient.cs               added in step 6, when the service needs to substitute it
-  Bank/AcquiringBankOptions.cs               BaseUrl, Timeout (appsettings "AcquiringBank"); not yet added
+  Bank/AcquiringBankOptions.cs               BaseUrl, Timeout (appsettings "AcquiringBank")
   Bank/AcquiringBankUnavailableException.cs  (done)
-  Program.cs                                  DI, typed HttpClient, TimeProvider.System, JsonStringEnumConverter
+  Program.cs                                  DI, validated options, typed HttpClient, TimeProvider.System, JsonStringEnumConverter
 test/PaymentGateway.Api.Tests/
   Unit/         validator, service, bank client, repository
   Integration/  WebApplicationFactory<Program> with a substituted IAcquiringBankClient
@@ -141,7 +143,7 @@ test/PaymentGateway.Api.Tests/
    - a bank failure is stored as Failed
    - the full card number and CVV never appear on `Payment`
    - idempotency: replay returns the same result and the bank is called once; a different fingerprint gives a conflict; a Pending payment gives in-progress
-7. **POST endpoint.** Integration tests for every row in the contract table, plus POST followed by GET returning the same payment (including Rejected and Failed ones).
+7. **POST endpoint.** (done) Integration tests cover every row in the contract table, plus POST followed by GET for Authorized, Declined, Rejected and Failed payments.
 8. **End-to-end.** Run against the simulator with `docker-compose up`, using card numbers ending in 1 (200 Authorized), 2 (200 Declined) and 0 (502, retrievable as Failed).
 9. **Refactor and document.**
    - Exception handling via `AddProblemDetails` and `UseExceptionHandler`.
@@ -156,7 +158,7 @@ test/PaymentGateway.Api.Tests/
 5. Missing required fields are a validation failure. They are stored as Rejected.
 6. Replaying a key always returns the original outcome, including a `400` or `502`. To retry after a `502`, the merchant uses a new key. The gateway never retries the bank automatically, to avoid double charges.
 7. Same key with a different body → `422`. Same key while the first request is still `Pending` → `409`.
-8. The request fingerprint is an HMAC-SHA256 (keyed with a configured secret) over card number, expiry, currency and amount; the CVV is excluded. The full card number and CVV are never stored or logged.
+8. The request fingerprint is an HMAC-SHA256 (keyed with `RequestFingerprint:Secret`, configured outside source control and validated to be at least 32 bytes) over card number, expiry, currency and amount; the CVV is excluded. The full card number and CVV are never stored or logged.
 9. For a Rejected attempt, the last four digits are stored only if the card number supplied is all digits and at least 4 long.
 10. Card expiry is valid through the end of its expiry month, so the current month is valid.
 11. Currency must be one of GBP, USD or EUR (uppercase, case-sensitive). Amount is an integer in minor units and must be greater than 0.
@@ -180,7 +182,7 @@ test/PaymentGateway.Api.Tests/
 ## Verification
 - `dotnet build` and `dotnet test --filter "Category!=BankSimulator"` pass with no running dependencies.
 - `docker-compose up -d`, then `dotnet test --filter Category=BankSimulator` passes.
-- Manual check: `dotnet run --project src/PaymentGateway.Api`, then curl or Swagger:
+- Manual check: configure `RequestFingerprint__Secret` with a secret of at least 32 bytes, then run `dotnet run --project src/PaymentGateway.Api` and use curl or Swagger:
   - POST cards ending in 1, 2 and 0
   - POST an invalid payload
   - resend the same key and body → identical response

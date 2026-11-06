@@ -14,7 +14,7 @@ public class PaymentService(
     IValidator<PostPaymentRequest> validator,
     RequestFingerprinter fingerprinter,
     IAcquiringBankClient bank,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider) : IPaymentService
 {
     public async Task<PaymentResult> ProcessAsync(
         Guid idempotencyKey, PostPaymentRequest request, CancellationToken cancellationToken = default)
@@ -30,6 +30,10 @@ public class PaymentService(
             RequestFingerprint = fingerprint,
             Status = PaymentStatus.Pending,
             CardNumberLastFour = LastFourDigits(request.CardNumber),
+            ExpiryMonth = request.ExpiryMonth,
+            ExpiryYear = request.ExpiryYear,
+            Currency = request.Currency,
+            Amount = request.Amount,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -48,14 +52,6 @@ public class PaymentService(
 
             return new PaymentResult.Rejected(payment.Id, errors);
         }
-
-        payment = payment with
-        {
-            ExpiryMonth = request.ExpiryMonth,
-            ExpiryYear = request.ExpiryYear,
-            Currency = request.Currency,
-            Amount = request.Amount
-        };
 
         BankPaymentResponse response;
         try
