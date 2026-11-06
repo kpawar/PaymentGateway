@@ -6,7 +6,7 @@
 > - TDD step 3 (GET endpoint): done. Integration tests in `Integration/PaymentsControllerTests.cs` cover 404 and a seeded payment (masked `PaymentResponse`, status as string). Old boilerplate repository and response DTOs removed. Tidy-up: `PaymentStatus` moved to `Domain/` (namespace `PaymentGateway.Api.Domain`), stale usings removed, factories disposed. `Failed` status is added later in step 6.
 > - TDD step 4 (validator): done. `PostPaymentRequest` reshaped (nullable, `CardNumber` and `Cvv` as strings). `PostPaymentRequestValidator` covers card number, expiry month, expiry (year and month vs `TimeProvider`, reported on the combined `ExpiryDate` field), currency, amount and CVV. Messages never echo card data. The planned all-null request test was skipped, because each field already has its own null case.
 > - TDD step 5 (bank client): done. `AcquiringBankClient` posts a snake_case body with `MM/YYYY` expiry to `/payments` and returns `BankPaymentResponse(Authorized, AuthorizationCode)`. A non-success status (including 400), a connection error and a timeout all throw `AcquiringBankUnavailableException`; a cancellation by the caller propagates unchanged. Tested with `StubHttpMessageHandler`. 64 tests pass in total. Not yet done, because nothing needs them until step 6: the `IAcquiringBankClient` interface, `AcquiringBankOptions` (BaseUrl, Timeout) and the typed `HttpClient` registration in `Program.cs`.
-> - Next: step 6 (`PaymentService`), starting with the first failing service test. That is where `Failed` is added to `PaymentStatus`, and where the `IAcquiringBankClient` interface, `IPaymentService`, the validator and `TimeProvider` DI registrations appear. Not yet started: steps 6 to 9.
+> - TDD step 6 (`PaymentService`): in progress. 6a done: `Services/RequestFingerprinter` (HMAC-SHA256 hex over card number, expiry, currency and amount; CVV excluded; secret-keyed; tolerates missing fields), 10 tests, 74 tests pass in total. Remaining in step 6: the service itself, where `Failed` is added to `PaymentStatus`, `RejectionReasons` is added to `Payment`, and the `IAcquiringBankClient` interface, `IPaymentService`, the fingerprint secret option and the validator and `TimeProvider` DI registrations appear. Not yet started: steps 7 to 9.
 > - Decision change since the plan was first written: fingerprint uses HMAC-SHA256 without the CVV (see POST flow and assumption 8).
 
 ## Context
@@ -47,6 +47,7 @@ src/PaymentGateway.Api/
   Domain/Payment.cs                          stored entity (see below)
   Domain/PaymentStatus.cs                    Pending, Authorized, Declined, Rejected, Failed
   Validation/PostPaymentRequestValidator.cs  FluentValidation + TimeProvider (done)
+  Services/RequestFingerprinter.cs           (done) HMAC-SHA256 fingerprint, CVV excluded
   Services/IPaymentService.cs, PaymentService.cs     idempotency -> validate -> bank -> persist
   Services/PaymentResult.cs                  outcome type: Processed | Rejected(errors) | BankUnavailable | IdempotencyConflict
   Persistence/IPaymentsRepository.cs, InMemoryPaymentsRepository.cs
