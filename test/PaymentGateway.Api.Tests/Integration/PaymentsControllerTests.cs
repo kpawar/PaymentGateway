@@ -1,47 +1,72 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 
+using PaymentGateway.Api.Domain;
+using PaymentGateway.Api.Models;
 using PaymentGateway.Api.Models.Responses;
-using PaymentGateway.Api.Services;
+using PaymentGateway.Api.Persistence;
+
+using Shouldly;
 
 namespace PaymentGateway.Api.Tests.Integration;
 
 public class PaymentsControllerTests
 {
-    private readonly Random _random = new();
-    
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
+
     [Fact]
     public async Task RetrievesAPaymentSuccessfully()
     {
         // Arrange
-        var payment = new PostPaymentResponse
+        var now = DateTimeOffset.UtcNow;
+        var payment = new Payment
         {
             Id = Guid.NewGuid(),
-            ExpiryYear = _random.Next(2023, 2030),
-            ExpiryMonth = _random.Next(1, 12),
-            Amount = _random.Next(1, 10000),
-            CardNumberLastFour = _random.Next(1111, 9999),
-            Currency = "GBP"
+            IdempotencyKey = Guid.NewGuid(),
+            RequestFingerprint = "fingerprint",
+            Status = PaymentStatus.Authorized,
+            CardNumberLastFour = "0123",
+            ExpiryMonth = 4,
+            ExpiryYear = 2030,
+            Currency = "GBP",
+            Amount = 1050,
+            AuthorizationCode = "auth-code",
+            CreatedAt = now,
+            UpdatedAt = now
         };
 
-        var paymentsRepository = new PaymentsRepository();
-        paymentsRepository.Add(payment);
-
         var webApplicationFactory = new WebApplicationFactory<Program>();
-        var client = webApplicationFactory.WithWebHostBuilder(builder =>
-            builder.ConfigureServices(services => ((ServiceCollection)services)
-                .AddSingleton(paymentsRepository)))
-            .CreateClient();
+        var repository = webApplicationFactory.Services.GetRequiredService<IPaymentsRepository>();
+        await repository.TryAddAsync(payment);
+        var client = webApplicationFactory.CreateClient();
 
         // Act
         var response = await client.GetAsync($"/api/Payments/{payment.Id}");
-        var paymentResponse = await response.Content.ReadFromJsonAsync<PostPaymentResponse>();
-        
+        var body = await response.Content.ReadAsStringAsync();
+        var paymentResponse = JsonSerializer.Deserialize<PaymentResponse>(body, JsonOptions);
+
         // Assert
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.NotNull(paymentResponse);
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        paymentResponse.ShouldBe(new PaymentResponse
+        {
+            Id = payment.Id,
+            Status = PaymentStatus.Authorized,
+            CardNumberLastFour = "0123",
+            ExpiryMonth = 4,
+            ExpiryYear = 2030,
+            Currency = "GBP",
+            Amount = 1050
+        });
+        body.ShouldContain("\"status\":\"Authorized\"");
+        body.ShouldNotContain("auth-code");
+        body.ShouldNotContain("fingerprint");
     }
 
     [Fact]
