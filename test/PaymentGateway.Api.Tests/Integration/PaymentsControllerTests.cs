@@ -163,6 +163,25 @@ public class PaymentsControllerTests
         stored.Status.ShouldBe(PaymentStatus.Failed);
     }
 
+    [Fact]
+    public async Task UnexpectedExceptionReturnsGenericProblemDetails()
+    {
+        var bank = Substitute.For<IAcquiringBankClient>();
+        bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("internal failure detail"));
+        using var factory = new PaymentsApiFactory(bank);
+        var client = factory.CreateClient();
+
+        using var response = await PostPaymentAsync(client, Guid.NewGuid().ToString(), ValidRequest());
+        var body = await response.Content.ReadAsStringAsync();
+
+        response.StatusCode.ShouldBe(HttpStatusCode.InternalServerError);
+        response.Content.Headers.ContentType?.MediaType.ShouldBe("application/problem+json");
+        using var problem = JsonDocument.Parse(body);
+        problem.RootElement.GetProperty("status").GetInt32().ShouldBe((int)HttpStatusCode.InternalServerError);
+        body.ShouldNotContain("internal failure detail");
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("not-a-guid")]

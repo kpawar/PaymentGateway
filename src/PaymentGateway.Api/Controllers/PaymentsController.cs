@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 using Microsoft.AspNetCore.Mvc;
 
 using PaymentGateway.Api.Domain;
@@ -22,8 +24,13 @@ public class PaymentsController : ControllerBase
     }
 
     [HttpPost]
+    [ProducesResponseType(typeof(PaymentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> PostPaymentAsync(
-        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey,
+        [FromHeader(Name = "Idempotency-Key"), Required] string? idempotencyKey,
         [FromBody] PostPaymentRequest request,
         CancellationToken cancellationToken)
     {
@@ -55,6 +62,8 @@ public class PaymentsController : ControllerBase
     }
 
     [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(PaymentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<PaymentResponse>> GetPaymentAsync(Guid id, CancellationToken cancellationToken)
     {
         var payment = await _paymentsRepository.GetByIdAsync(id, cancellationToken);
