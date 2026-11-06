@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace PaymentGateway.Api.Bank;
 
-public class AcquiringBankClient(HttpClient httpClient)
+public class AcquiringBankClient(HttpClient httpClient) : IAcquiringBankClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

@@ -16,7 +16,8 @@ public record Payment
     public string? Currency { get; init; }
     public int? Amount { get; init; }
     public string? AuthorizationCode { get; init; }
-    public IReadOnlyList<string>? RejectionReasons { get; init; }
+    /// <summary>Validation errors keyed by property name, kept so a replayed rejection returns the same body.</summary>
+    public IReadOnlyDictionary<string, string[]>? RejectionReasons { get; init; }
     public required DateTimeOffset CreatedAt { get; init; }
     public required DateTimeOffset UpdatedAt { get; init; }
 }
