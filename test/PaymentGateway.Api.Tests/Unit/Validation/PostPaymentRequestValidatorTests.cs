@@ -117,12 +117,37 @@ public class PostPaymentRequestValidatorTests
         result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.ExpiryMonth));
     }
 
-    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4, int? expiryYear = 2030) => new()
+    [Theory]
+    [InlineData("GBP")]
+    [InlineData("USD")]
+    [InlineData("EUR")]
+    public void Validate_SupportedCurrency_Passes(string currency)
+    {
+        var result = _validator.Validate(ValidRequest(currency: currency));
+
+        result.IsValid.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("JPY")]
+    [InlineData("gbp")]
+    [InlineData("GBPP")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Validate_UnsupportedCurrency_Fails(string? currency)
+    {
+        var result = _validator.Validate(ValidRequest(currency: currency));
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldAllBe(e => e.PropertyName == nameof(PostPaymentRequest.Currency));
+    }
+
+    private static PostPaymentRequest ValidRequest(string? cardNumber = "2222405343248877", int? expiryMonth = 4, int? expiryYear = 2030, string? currency = "GBP") => new()
     {
         CardNumber = cardNumber,
         ExpiryMonth = expiryMonth,
         ExpiryYear = expiryYear,
-        Currency = "GBP",
+        Currency = currency,
         Amount = 100,
         Cvv = "123"
     };

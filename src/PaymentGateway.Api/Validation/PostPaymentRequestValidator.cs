@@ -5,6 +5,8 @@ namespace PaymentGateway.Api.Validation;
 
 public class PostPaymentRequestValidator : AbstractValidator<PostPaymentRequest>
 {
+    private static readonly string[] SupportedCurrencies = ["GBP", "USD", "EUR"];
+
     public PostPaymentRequestValidator(TimeProvider timeProvider)
     {
         // Messages deliberately never include the attempted value: card data must not leak into responses or logs.
@@ -27,6 +29,10 @@ public class PostPaymentRequestValidator : AbstractValidator<PostPaymentRequest>
             .When(r => r.ExpiryYear is not null && r.ExpiryMonth is >= 1 and <= 12)
             .OverridePropertyName("ExpiryDate")
             .WithMessage("Card expiry date must be in the future.");
+
+        RuleFor(r => r.Currency)
+            .NotEmpty().WithMessage("Currency is required.")
+            .Must(c => SupportedCurrencies.Contains(c)).WithMessage("Currency must be one of: GBP, USD, EUR.");
     }
 
     private static bool IsInPast(int year, int month, DateTimeOffset now) =>
