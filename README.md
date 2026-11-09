@@ -17,11 +17,4 @@ PaymentGateway.sln
 
 Feel free to change the structure of the solution, use a different test library etc.
 
-## Design decisions and assumptions
-
-- **Request fingerprint:** Idempotency compares requests using an HMAC-SHA256 fingerprint of the card number, expiry, currency, and amount. The CVV is excluded and is never stored. Configure `RequestFingerprint__Secret` outside source control; it must contain at least 32 bytes.
-- **Idempotency-key scope:** Keys are global because merchant authentication is out of scope. If merchant authentication is added, scope keys to the merchant and key.
-- **Bank retries:** The gateway does not automatically retry bank requests, to avoid duplicate charges. After a stored `Failed` result, a merchant must use a new key to make another attempt.
-- **Payment statuses:** `Pending` tracks an in-flight request and `Failed` records bank unavailability, in addition to `Authorized` and `Declined`. Invalid requests return `Rejected` with validation errors but do not create a payment or payment ID, so they cannot be retrieved with GET.
-- **Invalid-request idempotency:** Invalid requests do not reserve their idempotency key. A corrected request can use the same key; once a valid request has reserved the key, the normal replay and conflict rules apply.
-- **Persistence:** Payments are held in an in-memory, per-instance store and are lost on restart. Multiple API instances require a shared store with an idempotency-key uniqueness constraint.
+For design decisions, assumptions and architecture documentation, check [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
