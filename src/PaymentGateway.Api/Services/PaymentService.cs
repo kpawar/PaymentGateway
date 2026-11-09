@@ -85,6 +85,20 @@ public class PaymentService(
 
             return new PaymentResult.BankUnavailable(payment.Id);
         }
+        catch (Exception exception)
+        {
+            // Caller cancellation or an unexpected error must not leave the key Pending forever.
+            // The caller may already have gone, so the update deliberately ignores its token.
+            await CompleteAsync(payment with { Status = PaymentStatus.Failed }, CancellationToken.None);
+            logger.LogWarning(
+                exception,
+                "Payment processing interrupted; payment marked {Outcome} after {ElapsedMilliseconds} ms for payment {PaymentId}",
+                PaymentStatus.Failed,
+                ElapsedMilliseconds(startedAt),
+                payment.Id);
+
+            throw;
+        }
 
         payment = response.Authorized
             ? payment with { Status = PaymentStatus.Authorized, AuthorizationCode = response.AuthorizationCode }

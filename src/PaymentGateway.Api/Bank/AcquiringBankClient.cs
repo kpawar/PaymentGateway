@@ -38,7 +38,16 @@ public class AcquiringBankClient(HttpClient httpClient) : IAcquiringBankClient
             throw new AcquiringBankUnavailableException($"Acquiring bank returned {(int)response.StatusCode}.");
         }
 
-        return (await response.Content.ReadFromJsonAsync<BankPaymentResponse>(JsonOptions, cancellationToken))!;
+        try
+        {
+            return await response.Content.ReadFromJsonAsync<BankPaymentResponse>(JsonOptions, cancellationToken)
+                ?? throw new AcquiringBankUnavailableException("The acquiring bank returned an empty response.");
+        }
+        catch (JsonException exception)
+        {
+            // Includes a missing "authorized" field: guessing Declined could hide a payment the bank authorized.
+            throw new AcquiringBankUnavailableException("The acquiring bank returned an unreadable response.", exception);
+        }
     }
 
     // The bank's wire format: serialised as snake_case, with expiry as "MM/YYYY".

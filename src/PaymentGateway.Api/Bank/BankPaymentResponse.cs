@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace PaymentGateway.Api.Bank;
 
-public record BankPaymentResponse(bool Authorized, string? AuthorizationCode);
+public record BankPaymentResponse([property: JsonRequired] bool Authorized, string? AuthorizationCode);

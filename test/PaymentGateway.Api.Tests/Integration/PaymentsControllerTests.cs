@@ -135,12 +135,35 @@ public class PaymentsControllerTests
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
-        body.RootElement.GetProperty("status").GetString().ShouldBe("Rejected");
-        body.RootElement.GetProperty("errors").GetProperty("ExpiryDate").GetArrayLength().ShouldBeGreaterThan(0);
+        AssertPaymentProblem(response, body, HttpStatusCode.BadRequest, PaymentStatus.Rejected);
+        body.RootElement.GetProperty("errors").GetProperty("expiryDate").GetArrayLength().ShouldBeGreaterThan(0);
         body.RootElement.TryGetProperty("paymentId", out _).ShouldBeFalse();
         (await factory.Services.GetRequiredService<IPaymentsRepository>()
             .GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
         await bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
+    }
+
+    [Fact]
+    public async Task ValidationErrorKeysMatchTheCamelCaseRequestFieldNames()
+    {
+        using var factory = new PaymentsApiFactory(Substitute.For<IAcquiringBankClient>());
+        var client = factory.CreateClient();
+        var request = new PostPaymentRequest
+        {
+            CardNumber = "123", ExpiryMonth = 13, ExpiryYear = 2030, Currency = "JPY", Amount = 0, Cvv = "12"
+        };
+
+        using var response = await PostPaymentAsync(client, Guid.NewGuid().ToString(), request);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        body.RootElement.GetProperty("errors").EnumerateObject().Select(error => error.Name)
+            .ShouldBe(["cardNumber", "expiryMonth", "currency", "amount", "cvv"], ignoreOrder: true);
+
+        using var expired = await PostPaymentAsync(client, Guid.NewGuid().ToString(), ValidRequest(expiryYear: 2020));
+        using var expiredBody = JsonDocument.Parse(await expired.Content.ReadAsStringAsync());
+        expiredBody.RootElement.GetProperty("errors").EnumerateObject().Select(error => error.Name)
+            .ShouldBe(["expiryDate"]);
     }
 
     [Fact]
@@ -157,7 +180,7 @@ public class PaymentsControllerTests
         var paymentId = body.RootElement.GetProperty("paymentId").GetGuid();
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadGateway);
-        body.RootElement.GetProperty("status").GetString().ShouldBe("Failed");
+        AssertPaymentProblem(response, body, HttpStatusCode.BadGateway, PaymentStatus.Failed);
         var stored = await factory.Services.GetRequiredService<IPaymentsRepository>().GetByIdAsync(paymentId);
         stored.ShouldNotBeNull();
         stored.Status.ShouldBe(PaymentStatus.Failed);
@@ -199,8 +222,11 @@ public class PaymentsControllerTests
         await bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
     }
 
-    [Fact]
-    public async Task InvalidJsonReturnsBadRequestWithoutReservingIdempotencyKey()
+    [Theory]
+    [InlineData("""{"amount":"not-an-integer"}""")]
+    [InlineData("not json")]
+    [InlineData("")]
+    public async Task UnreadableBodyReturnsGenericBadRequestWithoutReservingIdempotencyKey(string requestBody)
     {
         var idempotencyKey = Guid.NewGuid();
         var bank = Substitute.For<IAcquiringBankClient>();
@@ -208,13 +234,23 @@ public class PaymentsControllerTests
         var client = factory.CreateClient();
         using var message = new HttpRequestMessage(HttpMethod.Post, "/api/Payments")
         {
-            Content = new StringContent("""{"amount":"not-an-integer"}""", System.Text.Encoding.UTF8, "application/json")
+            Content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
         };
         message.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey.ToString());
 
         using var response = await client.SendAsync(message);
+        var body = await response.Content.ReadAsStringAsync();
+        using var problem = JsonDocument.Parse(body);
 
+        // Serializer internals (.NET type names, JSON paths) are not part of the merchant-facing contract.
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        response.Content.Headers.ContentType?.MediaType.ShouldBe("application/problem+json");
+        problem.RootElement.GetProperty("title").GetString().ShouldBe("Invalid request body");
+        problem.RootElement.GetProperty("traceId").GetString().ShouldNotBeNullOrWhiteSpace();
+        problem.RootElement.TryGetProperty("errors", out _).ShouldBeFalse();
+        problem.RootElement.TryGetProperty("paymentStatus", out _).ShouldBeFalse();
+        body.ShouldNotContain("System.");
+        body.ShouldNotContain("$.");
         (await factory.Services.GetRequiredService<IPaymentsRepository>()
             .GetByIdempotencyKeyAsync(idempotencyKey)).ShouldBeNull();
         await bank.DidNotReceiveWithAnyArgs().AuthorizeAsync(default!);
@@ -338,6 +374,36 @@ public class PaymentsControllerTests
     }
 
     [Fact]
+    public async Task UnexpectedBankCallFailureIsStoredAsFailedAndReplaysAsBadGateway()
+    {
+        var idempotencyKey = Guid.NewGuid();
+        var bank = Substitute.For<IAcquiringBankClient>();
+        bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("internal failure detail"));
+        using var factory = new PaymentsApiFactory(bank);
+        var client = factory.CreateClient();
+
+        using var first = await PostPaymentAsync(client, idempotencyKey.ToString(), ValidRequest());
+        var stored = await factory.Services.GetRequiredService<IPaymentsRepository>()
+            .GetByIdempotencyKeyAsync(idempotencyKey);
+        using var getResponse = await client.GetAsync($"/api/Payments/{stored?.Id}");
+        var retrieved = JsonSerializer.Deserialize<PaymentResponse>(
+            await getResponse.Content.ReadAsStringAsync(), JsonOptions);
+        using var replay = await PostPaymentAsync(client, idempotencyKey.ToString(), ValidRequest());
+        using var replayBody = JsonDocument.Parse(await replay.Content.ReadAsStringAsync());
+
+        first.StatusCode.ShouldBe(HttpStatusCode.InternalServerError);
+        stored.ShouldNotBeNull().Status.ShouldBe(PaymentStatus.Failed);
+        getResponse.StatusCode.ShouldBe(HttpStatusCode.OK);
+        retrieved.ShouldNotBeNull().Status.ShouldBe(PaymentStatus.Failed);
+        retrieved.CardNumberLastFour.ShouldBe("8877");
+        replay.StatusCode.ShouldBe(HttpStatusCode.BadGateway);
+        replayBody.RootElement.GetProperty("paymentId").GetGuid().ShouldBe(stored.Id);
+        AssertPaymentProblem(replay, replayBody, HttpStatusCode.BadGateway, PaymentStatus.Failed);
+        await bank.ReceivedWithAnyArgs(1).AuthorizeAsync(default!);
+    }
+
+    [Fact]
     public async Task RejectedRequestDoesNotReserveKeyAndCanBeCorrected()
     {
         var idempotencyKey = Guid.NewGuid();
@@ -356,11 +422,25 @@ public class PaymentsControllerTests
             client, idempotencyKey.ToString(), ValidRequest());
 
         rejected.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
-        rejectedBody.RootElement.GetProperty("status").GetString().ShouldBe("Rejected");
+        AssertPaymentProblem(rejected, rejectedBody, HttpStatusCode.BadRequest, PaymentStatus.Rejected);
         rejectedBody.RootElement.TryGetProperty("paymentId", out _).ShouldBeFalse();
         corrected.StatusCode.ShouldBe(HttpStatusCode.OK);
         (await repository.GetByIdempotencyKeyAsync(idempotencyKey))?.Status.ShouldBe(PaymentStatus.Authorized);
         await bank.Received(1).AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>());
+    }
+
+    // A payment problem keeps the standard numeric "status" (the HTTP code) exactly once, carries the payment
+    // outcome in "paymentStatus", and has the same "type" and "traceId" as every other Problem Details response.
+    private static void AssertPaymentProblem(
+        HttpResponseMessage response, JsonDocument body, HttpStatusCode statusCode, PaymentStatus paymentStatus)
+    {
+        response.Content.Headers.ContentType?.MediaType.ShouldBe("application/problem+json");
+        var root = body.RootElement;
+        root.EnumerateObject().Count(property => property.Name == "status").ShouldBe(1);
+        root.GetProperty("status").GetInt32().ShouldBe((int)statusCode);
+        root.GetProperty("paymentStatus").GetString().ShouldBe(paymentStatus.ToString());
+        root.GetProperty("type").GetString().ShouldNotBeNullOrWhiteSpace();
+        root.GetProperty("traceId").GetString().ShouldNotBeNullOrWhiteSpace();
     }
 
     private static async Task<HttpResponseMessage> PostPaymentAsync(

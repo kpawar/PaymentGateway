@@ -71,7 +71,8 @@ public class PaymentsBankSimulatorTests
         else
         {
             using var errorBody = JsonDocument.Parse(postBody);
-            errorBody.RootElement.GetProperty("status").GetString().ShouldBe("Failed");
+            errorBody.RootElement.GetProperty("status").GetInt32().ShouldBe((int)HttpStatusCode.BadGateway);
+            errorBody.RootElement.GetProperty("paymentStatus").GetString().ShouldBe("Failed");
             paymentId = errorBody.RootElement.GetProperty("paymentId").GetGuid();
         }
 

@@ -1,6 +1,8 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
 
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 using PaymentGateway.Api.Domain;
 using PaymentGateway.Api.Models.Requests;
@@ -76,29 +78,37 @@ public class PaymentsController : ControllerBase
         return Ok(PaymentResponse.From(payment));
     }
 
+    // Problem Details already defines "status" as the HTTP status code, so the payment outcome goes in "paymentStatus".
+    // Both problems are created by the ProblemDetailsFactory so they get the same "type" and "traceId" as other errors.
     private IActionResult CreateValidationProblem(PaymentResult.Rejected rejected)
     {
-        var problem = new ValidationProblemDetails(
-            rejected.Errors.ToDictionary(error => error.Key, error => error.Value))
+        // Error keys use the same camelCase names as the JSON request body, not the C# property names.
+        var modelState = new ModelStateDictionary();
+        foreach (var (field, messages) in rejected.Errors)
         {
-            Status = StatusCodes.Status400BadRequest,
-            Title = "One or more validation errors occurred."
-        };
-        problem.Extensions["status"] = nameof(PaymentStatus.Rejected);
+            foreach (var message in messages)
+            {
+                modelState.AddModelError(JsonNamingPolicy.CamelCase.ConvertName(field), message);
+            }
+        }
 
-        return BadRequest(problem);
+        var problem = ProblemDetailsFactory.CreateValidationProblemDetails(
+            HttpContext, modelState, StatusCodes.Status400BadRequest);
+        problem.Extensions["paymentStatus"] = nameof(PaymentStatus.Rejected);
+
+        return new ObjectResult(problem) { StatusCode = problem.Status };
     }
 
     private IActionResult CreateBankUnavailableProblem(PaymentResult.BankUnavailable unavailable)
     {
-        var problem = new ProblemDetails
-        {
-            Status = StatusCodes.Status502BadGateway,
-            Title = "Acquiring bank unavailable"
-        };
+        var problem = ProblemDetailsFactory.CreateProblemDetails(
+            HttpContext,
+            StatusCodes.Status502BadGateway,
+            title: "Acquiring bank unavailable",
+            type: "https://tools.ietf.org/html/rfc9110#section-15.6.3");
         problem.Extensions["paymentId"] = unavailable.PaymentId;
-        problem.Extensions["status"] = nameof(PaymentStatus.Failed);
+        problem.Extensions["paymentStatus"] = nameof(PaymentStatus.Failed);
 
-        return StatusCode(StatusCodes.Status502BadGateway, problem);
+        return new ObjectResult(problem) { StatusCode = problem.Status };
     }
 }

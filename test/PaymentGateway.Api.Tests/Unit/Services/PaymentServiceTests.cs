@@ -144,6 +144,42 @@ public class PaymentServiceTests
         log.Exception.ShouldBeOfType<AcquiringBankUnavailableException>();
     }
 
+    [Fact]
+    public async Task ProcessAsync_CallerCancelsDuringBankCall_StoresFailedPaymentAndPropagatesCancellation()
+    {
+        // A real store honours the caller's token, so model that to prove the Failed update still happens.
+        var repository = new CancellationHonouringRepository(_repository);
+        var timeProvider = new FakeTimeProvider(Now);
+        var service = new PaymentService(
+            repository, new PostPaymentRequestValidator(timeProvider), _fingerprinter, _bank, timeProvider, _logger);
+        var idempotencyKey = Guid.NewGuid();
+        using var cancellation = new CancellationTokenSource();
+        _bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .Returns<Task<BankPaymentResponse>>(_ =>
+            {
+                cancellation.Cancel();
+                throw new OperationCanceledException(cancellation.Token);
+            });
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => service.ProcessAsync(idempotencyKey, ValidRequest(), cancellation.Token));
+
+        await AssertInterruptedPaymentStoredAsFailedAsync<OperationCanceledException>(service, idempotencyKey);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_UnexpectedExceptionDuringBankCall_StoresFailedPaymentAndRethrows()
+    {
+        var idempotencyKey = Guid.NewGuid();
+        _bank.AuthorizeAsync(Arg.Any<BankPaymentRequest>(), Arg.Any<CancellationToken>())
+            .ThrowsAsync(new InvalidOperationException("unexpected"));
+
+        await Should.ThrowAsync<InvalidOperationException>(
+            () => _service.ProcessAsync(idempotencyKey, ValidRequest()));
+
+        await AssertInterruptedPaymentStoredAsFailedAsync<InvalidOperationException>(_service, idempotencyKey);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -319,6 +355,54 @@ public class PaymentServiceTests
         log.Message.ShouldNotContain("7391");
         log.Properties.Values.Select(value => value?.ToString())
             .ShouldNotContain(_fingerprinter.Compute(ValidRequest()));
+    }
+
+    // The payment must not stay Pending: it is stored as Failed, logged, and replays as BankUnavailable.
+    private async Task AssertInterruptedPaymentStoredAsFailedAsync<TException>(PaymentService service, Guid idempotencyKey)
+        where TException : Exception
+    {
+        var stored = await _repository.GetByIdempotencyKeyAsync(idempotencyKey);
+        stored.ShouldNotBeNull();
+        stored.Status.ShouldBe(PaymentStatus.Failed);
+        stored.CardNumberLastFour.ShouldBe("8877");
+
+        var log = _logger.Entries.ShouldHaveSingleItem();
+        log.Level.ShouldBe(LogLevel.Warning);
+        log.Message.ShouldStartWith("Payment processing interrupted; payment marked Failed");
+        log.Properties["PaymentId"].ShouldBe(stored.Id);
+        log.Properties.ContainsKey("ElapsedMilliseconds").ShouldBeTrue();
+        log.Exception.ShouldBeOfType<TException>();
+
+        var replay = await service.ProcessAsync(idempotencyKey, ValidRequest());
+        replay.ShouldBe(new PaymentResult.BankUnavailable(stored.Id));
+        await _bank.ReceivedWithAnyArgs(1).AuthorizeAsync(default!);
+    }
+
+    private sealed class CancellationHonouringRepository(IPaymentsRepository inner) : IPaymentsRepository
+    {
+        public Task<bool> TryAddAsync(Payment payment, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return inner.TryAddAsync(payment, cancellationToken);
+        }
+
+        public Task<Payment?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return inner.GetByIdAsync(id, cancellationToken);
+        }
+
+        public Task<Payment?> GetByIdempotencyKeyAsync(Guid idempotencyKey, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return inner.GetByIdempotencyKeyAsync(idempotencyKey, cancellationToken);
+        }
+
+        public Task UpdateAsync(Payment payment, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return inner.UpdateAsync(payment, cancellationToken);
+        }
     }
 
     private sealed class CapturingLogger<T> : ILogger<T>

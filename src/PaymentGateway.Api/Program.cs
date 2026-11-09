@@ -2,6 +2,9 @@ using System.Text;
 using System.Text.Json.Serialization;
 
 using FluentValidation;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Options;
 using PaymentGateway.Api.Bank;
 using PaymentGateway.Api.Models.Requests;
@@ -14,7 +17,29 @@ var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.
 
 builder.Services.AddControllers()
-    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+    .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()))
+    .ConfigureApiBehaviorOptions(options =>
+    {
+        // A body that can't be read as JSON gets one generic problem instead of serializer internals
+        // (.NET type names, JSON paths). Other model-state errors, such as a missing header, keep the default.
+        var defaultResponse = options.InvalidModelStateResponseFactory;
+        options.InvalidModelStateResponseFactory = context =>
+        {
+            if (!BodyCouldNotBeRead(context))
+            {
+                return defaultResponse(context);
+            }
+
+            var problem = context.HttpContext.RequestServices.GetRequiredService<ProblemDetailsFactory>()
+                .CreateProblemDetails(
+                    context.HttpContext,
+                    StatusCodes.Status400BadRequest,
+                    title: "Invalid request body",
+                    detail: "The request body must be a JSON payment request.");
+
+            return new BadRequestObjectResult(problem) { ContentTypes = { "application/problem+json" } };
+        };
+    });
 builder.Services.AddProblemDetails();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
@@ -69,6 +94,12 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
+// When the body can't be deserialized, the [FromBody] parameter is left unbound and has a model-state error.
+static bool BodyCouldNotBeRead(ActionContext context) =>
+    context.ActionDescriptor.Parameters
+        .Where(parameter => parameter.BindingInfo?.BindingSource == BindingSource.Body)
+        .Any(parameter => context.ModelState[parameter.Name]?.ValidationState == ModelValidationState.Invalid);
 
 // Exposes the implicit Program class to WebApplicationFactory<Program> in the test project.
 public partial class Program;

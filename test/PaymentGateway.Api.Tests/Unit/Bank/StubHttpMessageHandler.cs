@@ -5,7 +5,7 @@ namespace PaymentGateway.Api.Tests.Unit.Bank;
 /// <summary>
 /// Returns a canned response (or throws the given exception) and records the request it received, including its body.
 /// </summary>
-public class StubHttpMessageHandler(HttpStatusCode statusCode = HttpStatusCode.OK, string responseBody = "{}", Exception? exceptionToThrow = null)
+public class StubHttpMessageHandler(HttpStatusCode statusCode = HttpStatusCode.OK, string responseBody = """{"authorized": false, "authorization_code": ""}""", Exception? exceptionToThrow = null)
     : HttpMessageHandler
 {
     public HttpRequestMessage? Request { get; private set; }

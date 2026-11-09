@@ -75,6 +75,21 @@ public class AcquiringBankClientTests
         await act.ShouldThrowAsync<AcquiringBankUnavailableException>();
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("""{"authorization_code": "0bb07405-6d44-4b50-a14f-7ae0beff13ad"}""")]
+    public async Task AuthorizeAsync_BankReturnsSuccessWithUnusableBody_ThrowsAcquiringBankUnavailable(string responseBody)
+    {
+        var handler = new StubHttpMessageHandler(responseBody: responseBody);
+
+        var act = () => CreateClient(handler).AuthorizeAsync(Request);
+
+        await act.ShouldThrowAsync<AcquiringBankUnavailableException>();
+    }
+
     [Fact]
     public async Task AuthorizeAsync_ConnectionFails_ThrowsAcquiringBankUnavailable()
     {
